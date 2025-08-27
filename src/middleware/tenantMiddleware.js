@@ -1,16 +1,18 @@
 const logger = require('../utils/logger');
+const supabase = require('../utils/supabaseClient');
 
 /**
  * Tenant Resolution Middleware
  * Extracts tenant information from request context (subdomain, API key, or header)
  */
-function resolveTenant(req, res, next) {
+async function resolveTenant(req, res, next) {
   try {
     // First, try to extract tenant from X-Tenant-ID header (for testing)
     const tenantIdHeader = req.get('X-Tenant-ID');
     if (tenantIdHeader) {
       req.tenantId = tenantIdHeader;
       logger.debug('Tenant identified from X-Tenant-ID header', { tenantId: req.tenantId });
+      await setTenantContext(req.tenantId);
       return next();
     }
     
@@ -21,6 +23,7 @@ function resolveTenant(req, res, next) {
     if (subdomain && subdomain !== 'www' && subdomain !== 'api') {
       req.tenantId = subdomain;
       logger.debug('Tenant identified from subdomain', { tenantId: req.tenantId, host });
+      await setTenantContext(req.tenantId);
       return next();
     }
     
@@ -31,6 +34,7 @@ function resolveTenant(req, res, next) {
       // For now, we'll use a simple approach where the API key is the tenant ID
       req.tenantId = apiKey;
       logger.debug('Tenant identified from API key', { tenantId: req.tenantId });
+      await setTenantContext(req.tenantId);
       return next();
     }
     
@@ -39,6 +43,7 @@ function resolveTenant(req, res, next) {
     // this would likely result in a 400 error
     req.tenantId = 'default';
     logger.warn('No tenant identified, using default tenant', { host, hasApiKey: !!apiKey });
+    await setTenantContext(req.tenantId);
     next();
   } catch (error) {
     logger.error('Error resolving tenant', { 
@@ -77,6 +82,26 @@ function extractSubdomain(host) {
       operation: 'extractSubdomain'
     });
     return null;
+  }
+}
+
+/**
+ * Set tenant context for Supabase RLS
+ * @param {string} tenantId - The tenant ID
+ */
+async function setTenantContext(tenantId) {
+  try {
+    // Call the Supabase RPC function to set tenant context
+    // This will be used by RLS policies to enforce tenant isolation
+    await supabase.rpc('set_tenant_context', { tenant_id: tenantId });
+  } catch (error) {
+    logger.error('Error setting tenant context', { 
+      tenantId,
+      error: error.message,
+      operation: 'setTenantContext'
+    });
+    // We don't throw here as this is an enhancement for RLS
+    // The application should still function without it
   }
 }
 

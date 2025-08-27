@@ -1,10 +1,6 @@
-const { readCSV } = require('../utils/csvReader');
-const bcrypt = require('bcrypt');
-const jwt = require('jsonwebtoken');
-const path = require('path');
+const supabase = require('../utils/supabaseClient');
+const employeeService = require('../services/employeeService');
 const logger = require('../utils/logger');
-
-const EMPLOYEES_FILE = path.join(__dirname, '../../data/employees.csv');
 
 async function login(req, res) {
   try {
@@ -23,45 +19,28 @@ async function login(req, res) {
       return res.status(400).json({ error: 'Email and password are required' });
     }
     
-    // Find employee by email in tenant-specific directory
-    const tenantDataPath = path.join(__dirname, `../../data/${tenantId}`);
-    const tenantEmployeesFile = path.join(tenantDataPath, 'employees.csv');
+    // Sign in with Supabase Auth
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password
+    });
     
-    const employees = await readCSV(tenantEmployeesFile);
-    const employee = employees.find(emp => emp.email === email);
-    
-    if (!employee) {
-      logger.warn('Employee not found for login', { email, tenantId });
+    if (error) {
+      logger.warn('Invalid credentials for login', { email, tenantId, error: error.message });
       return res.status(401).json({ error: 'Invalid credentials' });
     }
     
-    // Verify password
-    const isPasswordValid = await bcrypt.compare(password, employee.password);
+    // Add tenant context to user object
+    const userWithTenant = {
+      ...data.user,
+      tenant_id: tenantId
+    };
     
-    if (!isPasswordValid) {
-      logger.warn('Invalid password for login', { email, tenantId });
-      return res.status(401).json({ error: 'Invalid credentials' });
-    }
-    
-    // Generate JWT token with tenant context
-    const token = jwt.sign(
-      { 
-        employee_id: employee.employee_id, 
-        email: employee.email,
-        tenantId: tenantId
-      },
-      process.env.JWT_SECRET || 'default_secret',
-      { expiresIn: '1h' }
-    );
-    
-    // Remove password from response
-    const { password: _, ...employeeData } = employee;
-    
-    logger.info('Login successful', { employeeId: employee.employee_id, tenantId });
+    logger.info('Login successful', { userId: data.user.id, tenantId });
     res.json({
       success: true,
-      token,
-      employee: employeeData
+      user: userWithTenant,
+      session: data.session
     });
   } catch (error) {
     logger.error('Login failed', { 
@@ -74,4 +53,90 @@ async function login(req, res) {
   }
 }
 
-module.exports = { login };
+async function register(req, res) {
+  try {
+    const { email, password, name, employee_id } = req.body;
+    const tenantId = req.tenantId || 'default';
+    
+    logger.debug('Registration attempt', { email, employee_id, tenantId });
+    
+    // Validate input
+    if (!email || !password || !name || !employee_id) {
+      logger.warn('Missing required fields for registration', { 
+        hasEmail: !!email,
+        hasPassword: !!password,
+        hasName: !!name,
+        hasEmployeeId: !!employee_id,
+        tenantId
+      });
+      return res.status(400).json({ error: 'Email, password, name, and employee_id are required' });
+    }
+    
+    // Validate password strength
+    if (password.length < 6) {
+      logger.warn('Password too short for registration', { email, tenantId });
+      return res.status(400).json({ error: 'Password must be at least 6 characters long' });
+    }
+    
+    // Register user with Supabase Auth
+    const { data, error } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          name,
+          employee_id,
+          tenant_id: tenantId
+        }
+      }
+    });
+    
+    if (error) {
+      logger.warn('Registration failed', { email, employee_id, tenantId, error: error.message });
+      if (error.message.includes('already registered')) {
+        return res.status(409).json({ error: 'User already registered' });
+      }
+      return res.status(400).json({ error: error.message });
+    }
+    
+    // Also create employee record in employees table
+    try {
+      const employeeData = {
+        employee_id,
+        name,
+        email,
+        tenant_id: tenantId
+      };
+      
+      // Create employee record (password will be handled by Supabase Auth)
+      await employeeService.createEmployee(tenantId, employeeData);
+    } catch (employeeError) {
+      logger.warn('Failed to create employee record', { 
+        email, 
+        employee_id, 
+        tenantId, 
+        error: employeeError.message 
+      });
+      // Note: In a production environment, you might want to handle this more gracefully
+      // For now, we'll log the error but still return success for the auth registration
+    }
+    
+    logger.info('Registration successful', { userId: data.user.id, email, employee_id, tenantId });
+    res.status(201).json({
+      success: true,
+      message: 'User registered successfully',
+      user: data.user
+    });
+  } catch (error) {
+    logger.error('Registration failed', { 
+      error: error.message, 
+      stack: error.stack,
+      operation: 'register',
+      email: req.body.email,
+      employee_id: req.body.employee_id
+    });
+    res.status(500).json({ error: 'Registration failed' });
+  }
+}
+
+module.exports = { login, register };

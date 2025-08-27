@@ -1,12 +1,8 @@
-const jwt = require('jsonwebtoken');
-const { readCSV } = require('../utils/csvReader');
-const path = require('path');
-
-const EMPLOYEES_FILE = path.join(__dirname, '../../data/employees.csv');
+const supabase = require('../utils/supabaseClient');
 
 /**
  * Authentication Middleware
- * Verify JWT tokens for protected routes
+ * Verify Supabase Auth tokens for protected routes
  */
 async function authenticateToken(req, res, next) {
   try {
@@ -18,54 +14,31 @@ async function authenticateToken(req, res, next) {
       return res.status(401).json({ error: 'Access token required' });
     }
     
-    // Verify the token
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'default_secret');
-    
-    // Store tenant ID from token
-    const tokenTenantId = decoded.tenantId || 'default';
-    
-    // Get tenant ID from request (set by tenant middleware)
-    const requestTenantId = req.tenantId || 'default';
-    
-    // Validate that tenant ID in token matches tenant ID in request
-    if (tokenTenantId !== requestTenantId) {
-      return res.status(401).json({ error: 'Token tenant mismatch' });
+    // Validate token format
+    if (!token) {
+      return res.status(401).json({ error: 'Invalid token format' });
     }
     
-    // Set tenant ID on request
-    req.tenantId = tokenTenantId;
+    // Get user from Supabase Auth
+    const { data, error } = await supabase.auth.getUser(token);
     
-    // Get employee data
-    // In a SaaS implementation, we would look in the tenant-specific directory
-    const tenantDataPath = path.join(__dirname, `../../data/${req.tenantId}`);
-    const tenantEmployeesFile = path.join(tenantDataPath, 'employees.csv');
-    
-    // Check if tenant directory exists, if not fall back to default
-    const employees = await readCSV(tenantEmployeesFile);
-    const employee = employees.find(emp => emp.employee_id === decoded.employee_id);
-    
-    if (!employee) {
+    if (error || !data.user) {
       return res.status(401).json({ error: 'Invalid token' });
+    }
+    
+    // Verify tenant ID matches request context
+    const requestTenantId = req.tenantId || 'default';
+    const userTenantId = data.user.user_metadata?.tenant_id || 'default';
+    
+    if (requestTenantId !== userTenantId) {
+      return res.status(403).json({ error: 'Access denied: Tenant mismatch' });
     }
     
     // Attach user information to request object
-    req.user = {
-      employee_id: employee.employee_id,
-      email: employee.email,
-      name: employee.name,
-      department: employee.department,
-      team: employee.team,
-      role: employee.role
-    };
+    req.user = data.user;
     
     next();
   } catch (error) {
-    if (error.name === 'TokenExpiredError') {
-      return res.status(401).json({ error: 'Token expired' });
-    }
-    if (error.name === 'JsonWebTokenError') {
-      return res.status(401).json({ error: 'Invalid token' });
-    }
     res.status(500).json({ error: 'Authentication failed' });
   }
 }

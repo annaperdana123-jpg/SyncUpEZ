@@ -1,13 +1,11 @@
-const jwt = require('jsonwebtoken');
-const { authenticateToken } = require('../src/middleware/authMiddleware');
-
-// Mock the readCSV function
-jest.mock('../src/utils/csvReader', () => ({
-  readCSV: jest.fn()
+// Mock the Supabase client
+jest.mock('../src/utils/supabaseClient', () => ({
+  auth: {
+    getUser: jest.fn()
+  }
 }));
 
-// Mock jwt
-jest.mock('jsonwebtoken');
+const { authenticateToken } = require('../src/middleware/authMiddleware');
 
 describe('Auth Middleware', () => {
   let req, res, next;
@@ -23,8 +21,7 @@ describe('Auth Middleware', () => {
     next = jest.fn();
     
     // Reset mocks
-    jwt.verify.mockReset();
-    require('../src/utils/csvReader').readCSV.mockReset();
+    jest.clearAllMocks();
   });
 
   afterEach(() => {
@@ -41,11 +38,11 @@ describe('Auth Middleware', () => {
 
     test('should return 401 if token is invalid', async () => {
       req.headers.authorization = 'Bearer invalid-token';
-      // Mock jwt.verify to throw a JsonWebTokenError
-      const error = new Error('invalid token');
-      error.name = 'JsonWebTokenError';
-      jwt.verify.mockImplementationOnce(() => {
-        throw error;
+      
+      // Mock Supabase auth to return an error
+      require('../src/utils/supabaseClient').auth.getUser.mockResolvedValueOnce({
+        data: null,
+        error: new Error('Invalid token')
       });
       
       await authenticateToken(req, res, next);
@@ -54,28 +51,51 @@ describe('Auth Middleware', () => {
       expect(next).not.toHaveBeenCalled();
     });
 
-    test('should return 401 if token is expired', async () => {
-      req.headers.authorization = 'Bearer expired-token';
-      const error = new Error('Token expired');
-      error.name = 'TokenExpiredError';
-      jwt.verify.mockImplementationOnce(() => {
-        throw error;
-      });
-      
-      await authenticateToken(req, res, next);
-      expect(res.status).toHaveBeenCalledWith(401);
-      expect(res.json).toHaveBeenCalledWith({ error: 'Token expired' });
-      expect(next).not.toHaveBeenCalled();
-    });
-
-    test('should return 401 if employee not found', async () => {
+    test('should call next if token is valid', async () => {
       req.headers.authorization = 'Bearer valid-token';
-      jwt.verify.mockReturnValueOnce({ employee_id: 'nonexistent' });
-      require('../src/utils/csvReader').readCSV.mockResolvedValueOnce([]);
+      req.tenantId = 'test-tenant';
+      
+      // Mock Supabase auth to return a valid user
+      require('../src/utils/supabaseClient').auth.getUser.mockResolvedValueOnce({
+        data: {
+          user: {
+            id: 'user-id',
+            email: 'test@example.com',
+            user_metadata: {
+              tenant_id: 'test-tenant'
+            }
+          }
+        },
+        error: null
+      });
       
       await authenticateToken(req, res, next);
-      expect(res.status).toHaveBeenCalledWith(401);
-      expect(res.json).toHaveBeenCalledWith({ error: 'Invalid token' });
+      expect(next).toHaveBeenCalled();
+      expect(req.user).toBeDefined();
+      expect(req.user.id).toBe('user-id');
+    });
+
+    test('should return 403 if tenant mismatch', async () => {
+      req.headers.authorization = 'Bearer valid-token';
+      req.tenantId = 'different-tenant';
+      
+      // Mock Supabase auth to return a user with different tenant
+      require('../src/utils/supabaseClient').auth.getUser.mockResolvedValueOnce({
+        data: {
+          user: {
+            id: 'user-id',
+            email: 'test@example.com',
+            user_metadata: {
+              tenant_id: 'user-tenant'
+            }
+          }
+        },
+        error: null
+      });
+      
+      await authenticateToken(req, res, next);
+      expect(res.status).toHaveBeenCalledWith(403);
+      expect(res.json).toHaveBeenCalledWith({ error: 'Access denied: Tenant mismatch' });
       expect(next).not.toHaveBeenCalled();
     });
   });

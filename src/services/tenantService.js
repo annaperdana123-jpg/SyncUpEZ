@@ -1,5 +1,4 @@
-const fs = require('fs');
-const path = require('path');
+const tenantRepository = require('../repositories/tenantRepository');
 const logger = require('../utils/logger');
 
 /**
@@ -22,31 +21,17 @@ async function provisionTenant(tenantId, tenantData = {}) {
       throw new Error('Invalid tenant ID');
     }
     
-    // Create tenant directory
-    const tenantDataPath = path.join(__dirname, `../../data/${tenantId}`);
-    
-    if (fs.existsSync(tenantDataPath)) {
-      logger.warn('Tenant directory already exists', { tenantId, tenantDataPath });
+    // Check if tenant already exists
+    const exists = await tenantRepository.tenantExists(tenantId);
+    if (exists) {
+      logger.warn('Tenant already exists', { tenantId });
       throw new Error(`Tenant ${tenantId} already exists`);
     }
     
-    // Create directory structure
-    fs.mkdirSync(tenantDataPath, { recursive: true });
+    // Create tenant in database
+    const tenant = await tenantRepository.createTenant(tenantId, tenantData);
     
-    // Initialize empty CSV files for the tenant
-    initializeTenantDataFiles(tenantDataPath);
-    
-    // Create tenant metadata file
-    const tenantMetadata = {
-      tenantId,
-      createdAt: new Date().toISOString(),
-      ...tenantData
-    };
-    
-    const metadataPath = path.join(tenantDataPath, 'tenant.json');
-    fs.writeFileSync(metadataPath, JSON.stringify(tenantMetadata, null, 2));
-    
-    logger.info('Tenant provisioned successfully', { tenantId, tenantDataPath });
+    logger.info('Tenant provisioned successfully', { tenantId });
     
     return {
       success: true,
@@ -65,59 +50,40 @@ async function provisionTenant(tenantId, tenantData = {}) {
 }
 
 /**
- * Initialize empty CSV files for a new tenant
- * @param {string} dataPath - Path to the tenant's data directory
- */
-function initializeTenantDataFiles(dataPath) {
-  const filesToCreate = [
-    'employees.csv',
-    'interactions.csv',
-    'kudos.csv',
-    'contributions.csv'
-  ];
-  
-  filesToCreate.forEach(fileName => {
-    const filePath = path.join(dataPath, fileName);
-    if (!fs.existsSync(filePath)) {
-      // Create an empty file
-      fs.writeFileSync(filePath, '');
-      logger.debug('Created empty data file for tenant', { filePath });
-    }
-  });
-}
-
-/**
  * Get tenant information
  * @param {string} tenantId - Tenant identifier
  * @returns {Promise<Object>} - Tenant information
  */
 async function getTenantInfo(tenantId) {
   try {
-    const tenantDataPath = path.join(__dirname, `../../data/${tenantId}`);
+    logger.debug('Fetching tenant information', { tenantId });
     
-    if (!fs.existsSync(tenantDataPath)) {
+    const tenant = await tenantRepository.getTenantById(tenantId);
+    
+    if (!tenant) {
       throw new Error(`Tenant ${tenantId} does not exist`);
     }
     
-    // Read tenant metadata
-    const metadataPath = path.join(tenantDataPath, 'tenant.json');
-    let tenantInfo = {
-      tenantId,
-      createdAt: null
+    logger.info('Tenant information retrieved', { tenantId });
+    
+    return {
+      tenantId: tenant.tenant_id,
+      name: tenant.name,
+      description: tenant.description,
+      contact_email: tenant.contact_email,
+      createdAt: tenant.created_at
     };
-    
-    if (fs.existsSync(metadataPath)) {
-      const metadataContent = fs.readFileSync(metadataPath, 'utf8');
-      tenantInfo = { ...tenantInfo, ...JSON.parse(metadataContent) };
-    }
-    
-    return tenantInfo;
   } catch (error) {
     logger.error('Failed to get tenant info', { 
       error: error.message, 
       stack: error.stack,
       tenantId
     });
+    
+    // For non-existent tenants, we should return a 404, not a 500
+    if (error.message.includes('does not exist')) {
+      throw error;
+    }
     
     throw new Error(`Failed to get tenant info for ${tenantId}: ${error.message}`);
   }
@@ -129,20 +95,19 @@ async function getTenantInfo(tenantId) {
  */
 async function listTenants() {
   try {
-    const dataPath = path.join(__dirname, '../../data');
-    const items = fs.readdirSync(dataPath);
+    logger.debug('Fetching all tenants');
     
-    // Filter out only directories that represent tenants
-    const tenants = items.filter(item => {
-      const itemPath = path.join(dataPath, item);
-      return fs.statSync(itemPath).isDirectory() && 
-             item !== 'default' && // Exclude default directory if it exists
-             fs.existsSync(path.join(itemPath, 'tenant.json')); // Must have metadata file
-    });
+    const tenants = await tenantRepository.listTenants();
     
-    logger.debug('Listed tenants', { count: tenants.length });
+    logger.info('Tenants retrieved', { count: tenants.length });
     
-    return tenants;
+    return tenants.map(tenant => ({
+      tenantId: tenant.tenant_id,
+      name: tenant.name,
+      description: tenant.description,
+      contact_email: tenant.contact_email,
+      createdAt: tenant.created_at
+    }));
   } catch (error) {
     logger.error('Failed to list tenants', { 
       error: error.message, 
@@ -162,14 +127,14 @@ async function deleteTenant(tenantId) {
   try {
     logger.warn('Deleting tenant (use with caution)', { tenantId });
     
-    const tenantDataPath = path.join(__dirname, `../../data/${tenantId}`);
-    
-    if (!fs.existsSync(tenantDataPath)) {
+    // Check if tenant exists
+    const exists = await tenantRepository.tenantExists(tenantId);
+    if (!exists) {
       throw new Error(`Tenant ${tenantId} does not exist`);
     }
     
-    // Remove the entire tenant directory
-    fs.rmSync(tenantDataPath, { recursive: true, force: true });
+    // Delete tenant from database
+    const tenant = await tenantRepository.deleteTenant(tenantId);
     
     logger.info('Tenant deleted successfully', { tenantId });
     
@@ -184,6 +149,11 @@ async function deleteTenant(tenantId) {
       stack: error.stack,
       tenantId
     });
+    
+    // For non-existent tenants, we should return a 404, not a 500
+    if (error.message.includes('does not exist')) {
+      throw error;
+    }
     
     throw new Error(`Failed to delete tenant ${tenantId}: ${error.message}`);
   }

@@ -1,5 +1,3 @@
-const { readCSV } = require('../utils/csvReader');
-
 /**
  * Contribution Scoring Service
  * Implements algorithms for measuring problem-solving, collaboration, and initiative

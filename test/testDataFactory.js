@@ -22,7 +22,7 @@ function createMockEmployee(overrides = {}) {
     employee_id: `emp_test_${timestamp}`,
     name: 'Test User',
     email: `test${timestamp}@example.com`,
-    password: 'password123',
+    // Removed password as it's handled by Supabase Auth
     department: 'Engineering',
     team: 'Backend',
     role: 'Developer',

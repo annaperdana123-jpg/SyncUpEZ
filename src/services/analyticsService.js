@@ -1,4 +1,7 @@
-const { readTenantCSV } = require('../utils/tenantCsvUtils');
+const employeeRepository = require('../repositories/employeeRepository');
+const contributionRepository = require('../repositories/contributionRepository');
+const interactionRepository = require('../repositories/interactionRepository');
+const kudosRepository = require('../repositories/kudosRepository');
 const logger = require('../utils/logger');
 
 /**
@@ -18,31 +21,25 @@ async function getEmployeeMetrics(employeeId, tenantId) {
     logger.debug('Fetching employee metrics', { employeeId, tenantId });
     
     // Get employee data
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
-    const employee = employees.find(emp => emp.employee_id === employeeId);
-    
-    if (!employee) {
+    let employee;
+    try {
+      employee = await employeeRepository.getEmployeeById(tenantId, employeeId);
+    } catch (error) {
       logger.warn('Employee not found for metrics', { employeeId, tenantId });
       throw new Error('Employee not found');
     }
     
     // Get latest contribution scores
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
-    const employeeContributions = contributions.filter(c => c.employee_id === employeeId);
-    
-    // Get latest contribution (assuming the last entry is the latest)
-    const latestContribution = employeeContributions.length > 0 
-      ? employeeContributions[employeeContributions.length - 1] 
-      : null;
+    const latestContribution = await contributionRepository.getLatestContribution(tenantId, employeeId);
     
     const result = {
       employee_id: employee.employee_id,
       name: employee.name,
       current_scores: latestContribution ? {
-        problem_solving_score: parseInt(latestContribution.problem_solving_score),
-        collaboration_score: parseInt(latestContribution.collaboration_score),
-        initiative_score: parseInt(latestContribution.initiative_score),
-        overall_score: parseInt(latestContribution.overall_score)
+        problem_solving_score: parseFloat(latestContribution.problem_solving_score),
+        collaboration_score: parseFloat(latestContribution.collaboration_score),
+        initiative_score: parseFloat(latestContribution.initiative_score),
+        overall_score: parseFloat(latestContribution.overall_score)
       } : {
         problem_solving_score: 0,
         collaboration_score: 0,
@@ -77,15 +74,14 @@ async function getEmployeeHistory(employeeId, tenantId) {
   try {
     logger.debug('Fetching employee history', { employeeId, tenantId });
     
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
+    const contributions = await contributionRepository.getContributionsByEmployeeId(tenantId, employeeId);
     const employeeContributions = contributions
-      .filter(c => c.employee_id === employeeId)
       .map(c => ({
-        date: c.date,
-        problem_solving_score: parseInt(c.problem_solving_score),
-        collaboration_score: parseInt(c.collaboration_score),
-        initiative_score: parseInt(c.initiative_score),
-        overall_score: parseInt(c.overall_score)
+        date: c.calculated_at,
+        problem_solving_score: parseFloat(c.problem_solving_score),
+        collaboration_score: parseFloat(c.collaboration_score),
+        initiative_score: parseFloat(c.initiative_score),
+        overall_score: parseFloat(c.overall_score)
       }))
       .sort((a, b) => new Date(a.date) - new Date(b.date)); // Sort by date
     
@@ -118,7 +114,7 @@ async function getTeamMetrics(teamId, tenantId) {
     logger.debug('Fetching team metrics', { teamId, tenantId });
     
     // Get employees in the team
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
+    const { data: employees } = await employeeRepository.getEmployees(tenantId, 1, 1000); // Get all employees
     const teamEmployees = employees.filter(emp => emp.team === teamId);
     
     if (teamEmployees.length === 0) {
@@ -126,16 +122,14 @@ async function getTeamMetrics(teamId, tenantId) {
       throw new Error('Team not found or has no employees');
     }
     
-    // Get latest contributions for all team members
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
-    
     // For each employee, get their latest contribution
-    const latestContributions = teamEmployees.map(employee => {
-      const employeeContributions = contributions.filter(c => c.employee_id === employee.employee_id);
-      return employeeContributions.length > 0 
-        ? employeeContributions[employeeContributions.length - 1] 
-        : null;
-    }).filter(c => c !== null); // Remove employees with no contributions
+    const latestContributions = [];
+    for (const employee of teamEmployees) {
+      const latestContribution = await contributionRepository.getLatestContribution(tenantId, employee.employee_id);
+      if (latestContribution) {
+        latestContributions.push(latestContribution);
+      }
+    }
     
     if (latestContributions.length === 0) {
       const result = {
@@ -155,10 +149,10 @@ async function getTeamMetrics(teamId, tenantId) {
     }
     
     // Calculate averages
-    const totalProblemSolving = latestContributions.reduce((sum, c) => sum + parseInt(c.problem_solving_score), 0);
-    const totalCollaboration = latestContributions.reduce((sum, c) => sum + parseInt(c.collaboration_score), 0);
-    const totalInitiative = latestContributions.reduce((sum, c) => sum + parseInt(c.initiative_score), 0);
-    const totalOverall = latestContributions.reduce((sum, c) => sum + parseInt(c.overall_score), 0);
+    const totalProblemSolving = latestContributions.reduce((sum, c) => sum + parseFloat(c.problem_solving_score), 0);
+    const totalCollaboration = latestContributions.reduce((sum, c) => sum + parseFloat(c.collaboration_score), 0);
+    const totalInitiative = latestContributions.reduce((sum, c) => sum + parseFloat(c.initiative_score), 0);
+    const totalOverall = latestContributions.reduce((sum, c) => sum + parseFloat(c.overall_score), 0);
     
     const count = latestContributions.length;
     
@@ -199,7 +193,7 @@ async function getDepartmentMetrics(deptId, tenantId) {
     logger.debug('Fetching department metrics', { deptId, tenantId });
     
     // Get employees in the department
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
+    const { data: employees } = await employeeRepository.getEmployees(tenantId, 1, 1000); // Get all employees
     const deptEmployees = employees.filter(emp => emp.department === deptId);
     
     if (deptEmployees.length === 0) {
@@ -210,16 +204,14 @@ async function getDepartmentMetrics(deptId, tenantId) {
     // Get unique teams in the department
     const teams = [...new Set(deptEmployees.map(emp => emp.team))];
     
-    // Get latest contributions for all department members
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
-    
     // For each employee, get their latest contribution
-    const latestContributions = deptEmployees.map(employee => {
-      const employeeContributions = contributions.filter(c => c.employee_id === employee.employee_id);
-      return employeeContributions.length > 0 
-        ? employeeContributions[employeeContributions.length - 1] 
-        : null;
-    }).filter(c => c !== null); // Remove employees with no contributions
+    const latestContributions = [];
+    for (const employee of deptEmployees) {
+      const latestContribution = await contributionRepository.getLatestContribution(tenantId, employee.employee_id);
+      if (latestContribution) {
+        latestContributions.push(latestContribution);
+      }
+    }
     
     if (latestContributions.length === 0) {
       const result = {
@@ -240,10 +232,10 @@ async function getDepartmentMetrics(deptId, tenantId) {
     }
     
     // Calculate averages
-    const totalProblemSolving = latestContributions.reduce((sum, c) => sum + parseInt(c.problem_solving_score), 0);
-    const totalCollaboration = latestContributions.reduce((sum, c) => sum + parseInt(c.collaboration_score), 0);
-    const totalInitiative = latestContributions.reduce((sum, c) => sum + parseInt(c.initiative_score), 0);
-    const totalOverall = latestContributions.reduce((sum, c) => sum + parseInt(c.overall_score), 0);
+    const totalProblemSolving = latestContributions.reduce((sum, c) => sum + parseFloat(c.problem_solving_score), 0);
+    const totalCollaboration = latestContributions.reduce((sum, c) => sum + parseFloat(c.collaboration_score), 0);
+    const totalInitiative = latestContributions.reduce((sum, c) => sum + parseFloat(c.initiative_score), 0);
+    const totalOverall = latestContributions.reduce((sum, c) => sum + parseFloat(c.overall_score), 0);
     
     const count = latestContributions.length;
     
@@ -284,19 +276,29 @@ async function getOverallStats(tenantId) {
     logger.debug('Fetching overall statistics', { tenantId });
     
     // Get all employees
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
+    const { data: employees } = await employeeRepository.getEmployees(tenantId, 1, 1000);
     
     // Get all interactions
-    const interactions = await readTenantCSV(tenantId, 'interactions.csv');
+    const { data: interactions } = await interactionRepository.getInteractions(tenantId, 1, 10000);
     
     // Get all kudos
-    const kudos = await readTenantCSV(tenantId, 'kudos.csv');
+    const { data: kudos } = await kudosRepository.getKudos(tenantId, 1, 10000);
     
     // Get all contributions
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
+    // For performance, we'll get a sample or use a different approach for large datasets
+    let allContributions = [];
+    let page = 1;
+    let hasMore = true;
+    
+    while (hasMore && allContributions.length < 10000) { // Limit to prevent performance issues
+      const { data: contributions } = await contributionRepository.getContributions(tenantId, page, 100);
+      allContributions = allContributions.concat(contributions);
+      hasMore = contributions.length === 100;
+      page++;
+    }
     
     // Calculate averages from contributions
-    if (contributions.length === 0) {
+    if (allContributions.length === 0) {
       const result = {
         total_employees: employees.length,
         total_interactions: interactions.length,
@@ -314,12 +316,12 @@ async function getOverallStats(tenantId) {
     }
     
     // Calculate averages
-    const totalProblemSolving = contributions.reduce((sum, c) => sum + parseInt(c.problem_solving_score), 0);
-    const totalCollaboration = contributions.reduce((sum, c) => sum + parseInt(c.collaboration_score), 0);
-    const totalInitiative = contributions.reduce((sum, c) => sum + parseInt(c.initiative_score), 0);
-    const totalOverall = contributions.reduce((sum, c) => sum + parseInt(c.overall_score), 0);
+    const totalProblemSolving = allContributions.reduce((sum, c) => sum + parseFloat(c.problem_solving_score), 0);
+    const totalCollaboration = allContributions.reduce((sum, c) => sum + parseFloat(c.collaboration_score), 0);
+    const totalInitiative = allContributions.reduce((sum, c) => sum + parseFloat(c.initiative_score), 0);
+    const totalOverall = allContributions.reduce((sum, c) => sum + parseFloat(c.overall_score), 0);
     
-    const count = contributions.length;
+    const count = allContributions.length;
     
     const result = {
       total_employees: employees.length,
@@ -361,26 +363,21 @@ async function getTopContributors(tenantId) {
     logger.debug('Fetching top contributors', { tenantId });
     
     // Get all employees
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
-    
-    // Get all contributions
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
+    const { data: employees } = await employeeRepository.getEmployees(tenantId, 1, 1000);
     
     // For each employee, get their latest overall score
-    const employeeScores = employees.map(employee => {
-      const employeeContributions = contributions.filter(c => c.employee_id === employee.employee_id);
-      const latestContribution = employeeContributions.length > 0 
-        ? employeeContributions[employeeContributions.length - 1] 
-        : null;
+    const employeeScores = [];
+    for (const employee of employees) {
+      const latestContribution = await contributionRepository.getLatestContribution(tenantId, employee.employee_id);
       
-      return {
+      employeeScores.push({
         employee_id: employee.employee_id,
         name: employee.name,
-        overall_score: latestContribution ? parseInt(latestContribution.overall_score) : 0,
+        overall_score: latestContribution ? parseFloat(latestContribution.overall_score) : 0,
         department: employee.department,
         team: employee.team
-      };
-    });
+      });
+    }
     
     // Sort by overall score (descending) and take top 10
     const sortedScores = employeeScores

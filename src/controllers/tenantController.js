@@ -31,6 +31,17 @@ async function createTenant(req, res) {
       stack: error.stack,
       operation: 'createTenant'
     });
+    
+    // Return 409 for conflicts (e.g., tenant already exists)
+    if (error.message.includes('already exists')) {
+      return res.status(409).json({ error: error.message });
+    }
+    
+    // Return 400 for validation errors
+    if (error.message.includes('Invalid tenant ID')) {
+      return res.status(400).json({ error: error.message });
+    }
+    
     res.status(500).json({ error: error.message });
   }
 }
@@ -54,6 +65,12 @@ async function getTenant(req, res) {
       stack: error.stack,
       operation: 'getTenant'
     });
+    
+    // Return 404 for non-existent tenants
+    if (error.message.includes('does not exist') || error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    
     res.status(500).json({ error: error.message });
   }
 }
@@ -100,6 +117,12 @@ async function removeTenant(req, res) {
       stack: error.stack,
       operation: 'removeTenant'
     });
+    
+    // Return 404 for non-existent tenants
+    if (error.message.includes('does not exist') || error.message.includes('not found')) {
+      return res.status(404).json({ error: error.message });
+    }
+    
     res.status(500).json({ error: error.message });
   }
 }

@@ -1,21 +1,15 @@
-const { readCSV } = require('../utils/csvReader');
-const { appendCSV } = require('../utils/csvWriter');
-const { readTenantCSV, appendToTenantCSV } = require('../utils/tenantCsvUtils');
+const employeeRepository = require('../repositories/employeeRepository');
+const interactionRepository = require('../repositories/interactionRepository');
+const kudosRepository = require('../repositories/kudosRepository');
+const contributionRepository = require('../repositories/contributionRepository');
 const { 
   calculateProblemSolvingScore, 
   calculateCollaborationScore, 
   calculateInitiativeScore,
   calculateOverallScore
 } = require('../services/scoringService');
-const path = require('path');
 const logger = require('../utils/logger');
 const { ValidationError, NotFoundError } = require('../utils/customErrors');
-
-// Default file paths (will be overridden by tenant-specific paths)
-const CONTRIBUTIONS_FILE = path.join(__dirname, '../../data/contributions.csv');
-const INTERACTIONS_FILE = path.join(__dirname, '../../data/interactions.csv');
-const KUDOS_FILE = path.join(__dirname, '../../data/kudos.csv');
-const EMPLOYEES_FILE = path.join(__dirname, '../../data/employees.csv');
 
 /**
  * Validate contribution data
@@ -67,26 +61,6 @@ function validateContributionData(contributionData) {
 }
 
 /**
- * Check if employee exists (tenant-aware)
- * @param {string} employeeId - Employee ID to check
- * @param {string} tenantId - Tenant ID
- * @returns {Promise<boolean>} - Whether employee exists
- */
-async function employeeExists(employeeId, tenantId) {
-  try {
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
-    return employees.some(emp => emp.employee_id === employeeId);
-  } catch (error) {
-    logger.error('Failed to check employee existence', { 
-      error: error.message, 
-      employeeId,
-      tenantId
-    });
-    return false; // Assume it doesn't exist if we can't check
-  }
-}
-
-/**
  * Get all contribution scores (tenant-aware)
  */
 async function getContributions(req, res) {
@@ -97,7 +71,6 @@ async function getContributions(req, res) {
     // Get pagination parameters from query
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
     
     // Validate pagination parameters
     if (page < 1 || limit < 1 || limit > 100) {
@@ -107,28 +80,17 @@ async function getContributions(req, res) {
       });
     }
     
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
-    
-    // Apply pagination
-    const paginatedContributions = contributions.slice(offset, offset + limit);
+    const result = await contributionRepository.getContributions(tenantId, page, limit);
     
     logger.info('Successfully fetched contribution scores with pagination', { 
       page, 
       limit, 
-      totalCount: contributions.length,
-      returnedCount: paginatedContributions.length,
+      totalCount: result.pagination.totalCount,
+      returnedCount: result.data.length,
       tenantId
     });
     
-    res.json({
-      data: paginatedContributions,
-      pagination: {
-        page,
-        limit,
-        totalCount: contributions.length,
-        totalPages: Math.ceil(contributions.length / limit)
-      }
-    });
+    res.json(result);
   } catch (error) {
     logger.error('Failed to retrieve contributions', { 
       error: error.message, 
@@ -148,15 +110,14 @@ async function getContributionsByEmployeeId(req, res) {
     const tenantId = req.tenantId || 'default';
     logger.debug('Fetching contribution scores for employee', { employeeId: id, tenantId });
     
-    const contributions = await readTenantCSV(tenantId, 'contributions.csv');
-    const employeeContributions = contributions.filter(c => c.employee_id === id);
+    const contributions = await contributionRepository.getContributionsByEmployeeId(tenantId, id);
     
     logger.info('Successfully fetched contribution scores for employee', { 
       employeeId: id, 
-      count: employeeContributions.length,
+      count: contributions.length,
       tenantId
     });
-    res.json(employeeContributions);
+    res.json(contributions);
   } catch (error) {
     logger.error('Failed to retrieve contributions for employee', { 
       error: error.message, 
@@ -189,7 +150,9 @@ async function addContributionScores(req, res) {
     }
     
     // Check if employee exists
-    if (!await employeeExists(contributionData.employee_id, tenantId)) {
+    try {
+      await employeeRepository.getEmployeeById(tenantId, contributionData.employee_id);
+    } catch (error) {
       logger.warn('Employee not found for contribution scores', { employeeId: contributionData.employee_id, tenantId });
       throw new NotFoundError('Employee not found', 'employee');
     }
@@ -211,8 +174,8 @@ async function addContributionScores(req, res) {
       logger.debug('Calculating contribution scores automatically', { employeeId: contributionData.employee_id, tenantId });
       
       // Get employee data
-      const employees = await readTenantCSV(tenantId, 'employees.csv');
-      const employee = employees.find(emp => emp.employee_id === contributionData.employee_id);
+      const { data: allEmployees } = await employeeRepository.getEmployees(tenantId, 1, 1000);
+      const employee = allEmployees.find(emp => emp.employee_id === contributionData.employee_id);
       
       if (!employee) {
         logger.warn('Employee not found for contribution scores', { employeeId: contributionData.employee_id, tenantId });
@@ -220,12 +183,10 @@ async function addContributionScores(req, res) {
       }
       
       // Get employee interactions
-      const interactions = await readTenantCSV(tenantId, 'interactions.csv');
-      const employeeInteractions = interactions.filter(int => int.employee_id === contributionData.employee_id);
+      const { data: employeeInteractions } = await interactionRepository.getInteractionsByEmployeeId(tenantId, contributionData.employee_id);
       
       // Get employee kudos
-      const kudos = await readTenantCSV(tenantId, 'kudos.csv');
-      const employeeKudos = kudos.filter(k => k.to_employee_id === contributionData.employee_id);
+      const employeeKudos = await kudosRepository.getKudosByEmployeeId(tenantId, contributionData.employee_id);
       
       // Calculate scores if not provided
       if (problem_solving_score === undefined) {
@@ -250,7 +211,7 @@ async function addContributionScores(req, res) {
       }
       
       if (collaboration_score === undefined) {
-        collaboration_score = calculateCollaborationScore(employeeKudos, employees);
+        collaboration_score = calculateCollaborationScore(employeeKudos, allEmployees);
         logger.debug('Calculated collaboration score', { 
           employeeId: contributionData.employee_id,
           score: collaboration_score,
@@ -314,24 +275,14 @@ async function addContributionScores(req, res) {
     // Create contribution object
     const newContribution = {
       employee_id: contributionData.employee_id,
-      date: contributionData.date || new Date().toISOString().split('T')[0], // YYYY-MM-DD format
+      calculated_at: new Date().toISOString(),
       problem_solving_score: problem_solving_score,
       collaboration_score: collaboration_score,
       initiative_score: initiative_score,
       overall_score: overall_score
     };
     
-    // Define headers for contributions.csv
-    const headers = [
-      {id: 'employee_id', title: 'employee_id'},
-      {id: 'date', title: 'date'},
-      {id: 'problem_solving_score', title: 'problem_solving_score'},
-      {id: 'collaboration_score', title: 'collaboration_score'},
-      {id: 'initiative_score', title: 'initiative_score'},
-      {id: 'overall_score', title: 'overall_score'}
-    ];
-    
-    await appendToTenantCSV(tenantId, 'contributions.csv', headers, newContribution);
+    const createdContribution = await contributionRepository.createContribution(tenantId, newContribution);
     
     logger.info('Contribution scores added successfully', { 
       employeeId: contributionData.employee_id,
@@ -340,7 +291,7 @@ async function addContributionScores(req, res) {
     });
     res.status(201).json({ 
       message: 'Contribution scores added successfully', 
-      contribution: newContribution 
+      contribution: createdContribution
     });
   } catch (error) {
     if (error instanceof ValidationError) {

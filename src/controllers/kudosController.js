@@ -1,13 +1,7 @@
-const { readCSV } = require('../utils/csvReader');
-const { appendCSV } = require('../utils/csvWriter');
-const { readTenantCSV, appendToTenantCSV } = require('../utils/tenantCsvUtils');
-const path = require('path');
+const kudosRepository = require('../repositories/kudosRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const logger = require('../utils/logger');
 const { ValidationError, NotFoundError } = require('../utils/customErrors');
-
-// Default file paths (will be overridden by tenant-specific paths)
-const KUDOS_FILE = path.join(__dirname, '../../data/kudos.csv');
-const EMPLOYEES_FILE = path.join(__dirname, '../../data/employees.csv');
 
 /**
  * Validate kudos data
@@ -59,26 +53,6 @@ function validateKudosData(kudosData) {
 }
 
 /**
- * Check if employee exists (tenant-aware)
- * @param {string} employeeId - Employee ID to check
- * @param {string} tenantId - Tenant ID
- * @returns {Promise<boolean>} - Whether employee exists
- */
-async function employeeExists(employeeId, tenantId) {
-  try {
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
-    return employees.some(emp => emp.employee_id === employeeId);
-  } catch (error) {
-    logger.error('Failed to check employee existence', { 
-      error: error.message, 
-      employeeId,
-      tenantId
-    });
-    return false; // Assume it doesn't exist if we can't check
-  }
-}
-
-/**
  * Get all kudos (tenant-aware)
  */
 async function getKudos(req, res) {
@@ -89,7 +63,6 @@ async function getKudos(req, res) {
     // Get pagination parameters from query
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
     
     // Validate pagination parameters
     if (page < 1 || limit < 1 || limit > 100) {
@@ -99,28 +72,17 @@ async function getKudos(req, res) {
       });
     }
     
-    const kudos = await readTenantCSV(tenantId, 'kudos.csv');
-    
-    // Apply pagination
-    const paginatedKudos = kudos.slice(offset, offset + limit);
+    const result = await kudosRepository.getKudos(tenantId, page, limit);
     
     logger.info('Successfully fetched kudos with pagination', { 
       page, 
       limit, 
-      totalCount: kudos.length,
-      returnedCount: paginatedKudos.length,
+      totalCount: result.pagination.totalCount,
+      returnedCount: result.data.length,
       tenantId
     });
     
-    res.json({
-      data: paginatedKudos,
-      pagination: {
-        page,
-        limit,
-        totalCount: kudos.length,
-        totalPages: Math.ceil(kudos.length / limit)
-      }
-    });
+    res.json(result);
   } catch (error) {
     logger.error('Failed to retrieve kudos', { 
       error: error.message, 
@@ -140,15 +102,14 @@ async function getKudosByEmployeeId(req, res) {
     const tenantId = req.tenantId || 'default';
     logger.debug('Fetching kudos for employee', { employeeId: id, tenantId });
     
-    const kudos = await readTenantCSV(tenantId, 'kudos.csv');
-    const employeeKudos = kudos.filter(k => k.to_employee_id === id);
+    const kudos = await kudosRepository.getKudosByEmployeeId(tenantId, id);
     
     logger.info('Successfully fetched kudos for employee', { 
       employeeId: id, 
-      count: employeeKudos.length,
+      count: kudos.length,
       tenantId
     });
-    res.json(employeeKudos);
+    res.json(kudos);
   } catch (error) {
     logger.error('Failed to retrieve kudos for employee', { 
       error: error.message, 
@@ -185,44 +146,35 @@ async function createKudos(req, res) {
     }
     
     // Check if from employee exists
-    if (!await employeeExists(kudosData.from_employee_id, tenantId)) {
+    try {
+      await employeeRepository.getEmployeeById(tenantId, kudosData.from_employee_id);
+    } catch (error) {
       logger.warn('From employee not found for kudos', { fromEmployeeId: kudosData.from_employee_id, tenantId });
       throw new NotFoundError('From employee not found', 'employee');
     }
     
     // Check if to employee exists
-    if (!await employeeExists(kudosData.to_employee_id, tenantId)) {
+    try {
+      await employeeRepository.getEmployeeById(tenantId, kudosData.to_employee_id);
+    } catch (error) {
       logger.warn('To employee not found for kudos', { toEmployeeId: kudosData.to_employee_id, tenantId });
       throw new NotFoundError('To employee not found', 'employee');
     }
     
-    // Generate kudos ID
-    const kudos_id = `kudos${Date.now()}`;
-    
     // Create kudos object
     const newKudos = {
-      kudos_id,
       from_employee_id: kudosData.from_employee_id,
       to_employee_id: kudosData.to_employee_id,
       message: kudosData.message,
       timestamp: kudosData.timestamp || new Date().toISOString()
     };
     
-    // Define headers for kudos.csv
-    const headers = [
-      {id: 'kudos_id', title: 'kudos_id'},
-      {id: 'from_employee_id', title: 'from_employee_id'},
-      {id: 'to_employee_id', title: 'to_employee_id'},
-      {id: 'message', title: 'message'},
-      {id: 'timestamp', title: 'timestamp'}
-    ];
+    const createdKudos = await kudosRepository.createKudos(tenantId, newKudos);
     
-    await appendToTenantCSV(tenantId, 'kudos.csv', headers, newKudos);
-    
-    logger.info('Kudos created successfully', { kudosId: kudos_id, tenantId });
+    logger.info('Kudos created successfully', { kudosId: createdKudos.id, tenantId });
     res.status(201).json({ 
       message: 'Kudos created successfully', 
-      kudos: newKudos 
+      kudos: createdKudos 
     });
   } catch (error) {
     if (error instanceof ValidationError) {

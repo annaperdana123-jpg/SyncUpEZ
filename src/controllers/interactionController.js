@@ -1,13 +1,7 @@
-const { readCSV } = require('../utils/csvReader');
-const { appendCSV } = require('../utils/csvWriter');
-const { readTenantCSV, appendToTenantCSV } = require('../utils/tenantCsvUtils');
-const path = require('path');
+const interactionRepository = require('../repositories/interactionRepository');
+const employeeRepository = require('../repositories/employeeRepository');
 const logger = require('../utils/logger');
 const { ValidationError, NotFoundError } = require('../utils/customErrors');
-
-// Default file paths (will be overridden by tenant-specific paths)
-const INTERACTIONS_FILE = path.join(__dirname, '../../data/interactions.csv');
-const EMPLOYEES_FILE = path.join(__dirname, '../../data/employees.csv');
 
 /**
  * Validate interaction data
@@ -58,68 +52,24 @@ function validateInteractionData(interaction) {
 }
 
 /**
- * Check if employee exists (tenant-aware)
- * @param {string} employeeId - Employee ID to check
- * @param {string} tenantId - Tenant ID
- * @returns {Promise<boolean>} - Whether employee exists
- */
-async function employeeExists(employeeId, tenantId) {
-  try {
-    const employees = await readTenantCSV(tenantId, 'employees.csv');
-    return employees.some(emp => emp.employee_id === employeeId);
-  } catch (error) {
-    logger.error('Failed to check employee existence', { 
-      error: error.message, 
-      employeeId,
-      tenantId
-    });
-    return false; // Assume it doesn't exist if we can't check
-  }
-}
-
-/**
  * Get all interactions (tenant-aware)
  */
 async function getInteractions(req, res) {
   try {
     const tenantId = req.tenantId || 'default';
-    logger.debug('Fetching all interactions', { tenantId });
-    
-    // Get pagination parameters from query
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
     
     // Validate pagination parameters
     if (page < 1 || limit < 1 || limit > 100) {
-      logger.warn('Invalid pagination parameters', { page, limit, tenantId });
       return res.status(400).json({ 
         error: 'Invalid pagination parameters. Page must be >= 1 and limit must be between 1 and 100.' 
       });
     }
     
-    const interactions = await readTenantCSV(tenantId, 'interactions.csv');
+    const result = await interactionRepository.getInteractions(tenantId, page, limit);
     
-    // Apply pagination
-    const paginatedInteractions = interactions.slice(offset, offset + limit);
-    
-    logger.info('Successfully fetched interactions with pagination', { 
-      page, 
-      limit, 
-      totalCount: interactions.length,
-      returnedCount: paginatedInteractions.length,
-      tenantId
-    });
-    
-    res.json({
-      data: paginatedInteractions,
-      pagination: {
-        page,
-        limit,
-        totalCount: interactions.length,
-        totalPages: Math.ceil(interactions.length / limit)
-      }
-    });
+    res.json(result);
   } catch (error) {
     logger.error('Failed to retrieve interactions', { 
       error: error.message, 
@@ -137,17 +87,10 @@ async function getInteractionsByEmployeeId(req, res) {
   try {
     const { id } = req.params;
     const tenantId = req.tenantId || 'default';
-    logger.debug('Fetching interactions by employee ID', { employeeId: id, tenantId });
     
-    const interactions = await readTenantCSV(tenantId, 'interactions.csv');
-    const employeeInteractions = interactions.filter(interaction => interaction.employee_id === id);
+    const interactions = await interactionRepository.getInteractionsByEmployeeId(tenantId, id);
     
-    logger.info('Successfully fetched interactions for employee', { 
-      employeeId: id, 
-      count: employeeInteractions.length,
-      tenantId
-    });
-    res.json(employeeInteractions);
+    res.json(interactions);
   } catch (error) {
     logger.error('Failed to retrieve interactions for employee', { 
       error: error.message, 
@@ -179,43 +122,32 @@ async function createInteraction(req, res) {
     }
     
     // Check if employee exists
-    if (!await employeeExists(interaction.employee_id, tenantId)) {
+    try {
+      await employeeRepository.getEmployeeById(tenantId, interaction.employee_id);
+    } catch (error) {
       logger.warn('Employee not found for interaction', { employeeId: interaction.employee_id, tenantId });
       throw new NotFoundError('Employee not found', 'employee');
     }
     
-    // Generate interaction ID
-    const interaction_id = `int${Date.now()}`;
-    
     // Add timestamp if not provided
     interaction.timestamp = interaction.timestamp || new Date().toISOString();
     
-    // Create interaction object
+    // Create interaction object (mapping to the new schema)
     const newInteraction = {
-      interaction_id,
-      employee_id: interaction.employee_id,
-      type: interaction.type,
+      from_employee_id: interaction.employee_id,
+      to_employee_id: interaction.employee_id,
+      interaction_type: interaction.type,
       content: interaction.content,
       timestamp: interaction.timestamp,
       context_tags: interaction.context_tags || ''
     };
     
-    // Define headers for interactions.csv
-    const headers = [
-      {id: 'interaction_id', title: 'interaction_id'},
-      {id: 'employee_id', title: 'employee_id'},
-      {id: 'type', title: 'type'},
-      {id: 'content', title: 'content'},
-      {id: 'timestamp', title: 'timestamp'},
-      {id: 'context_tags', title: 'context_tags'}
-    ];
+    const createdInteraction = await interactionRepository.createInteraction(tenantId, newInteraction);
     
-    await appendToTenantCSV(tenantId, 'interactions.csv', headers, newInteraction);
-    
-    logger.info('Interaction created successfully', { interactionId: interaction_id, tenantId });
+    logger.info('Interaction created successfully', { interactionId: createdInteraction.id, tenantId });
     res.status(201).json({ 
       message: 'Interaction created successfully', 
-      interaction: newInteraction 
+      interaction: createdInteraction 
     });
   } catch (error) {
     if (error instanceof ValidationError) {
